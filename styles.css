@@ -388,15 +388,15 @@
 	align-items: center;
 	flex-shrink: 0;
 }
-.mc-batch-property { width: 100%; padding-right: 44px; -webkit-appearance: none; appearance: none; }
+.mc-batch-property { width: 100%; padding-right: 28px; -webkit-appearance: none; appearance: none; }
 .mc-batch-property::-webkit-calendar-picker-indicator { display: none; opacity: 0; }
 .mc-batch-property::-webkit-list-button { display: none; }
 .mc-batch-property-clear,
 .mc-batch-property-drop {
 	position: absolute;
-	right: 0;
-	width: 44px;
-	height: 44px;
+	right: 4px;
+	width: 24px;
+	height: 24px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -406,6 +406,16 @@
 	cursor: pointer;
 	border-radius: 50%;
 	padding: 0;
+}
+/* Expand hit area to 44px without enlarging visual button (24px + 10px per side) */
+.mc-batch-property-clear::after,
+.mc-batch-property-drop::after {
+	content: "";
+	position: absolute;
+	top: -10px;
+	left: -10px;
+	right: -10px;
+	bottom: -10px;
 }
 .mc-batch-property-clear:hover,
 .mc-batch-property-drop:hover {
