@@ -135,8 +135,7 @@ export default class Sidecar {
 			await this.app.fileManager.processFrontMatter(this.file, (fm) => fm[tag] = value);
             
 			if (type) {
-				// @ts-ignore
-				this.app.metadataTypeManager.properties[tag.toLowerCase()].type = type;
+				(this.app as any).metadataTypeManager.properties[tag.toLowerCase()].type = type;
 			}
 		} catch (e) {
 			console.error(e);

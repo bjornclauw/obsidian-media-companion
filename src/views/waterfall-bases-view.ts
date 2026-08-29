@@ -1,4 +1,6 @@
 import { BasesView, Keymap, Menu, Notice, parsePropertyId, TFolder, setIcon, type BasesPropertyId, type QueryController, type HoverParent, type HoverPopover, type TFile, type BasesEntry, type WorkspaceLeaf } from "obsidian";
+import { isListValue, resolvePropertyId, toDisplayValue, valuesEqual } from "./waterfall-batch";
+import { confirmBatchModal } from "./waterfall-batch-modal";
 import Sidecar from "../model/sidecar";
 import { getMediaType, MediaTypes } from "../model/types/mediaTypes";
 import { getShape } from "../model/types/shape";
@@ -67,14 +69,70 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 	private visibleProperties: BasesPropertyId[] = [];
 	private lastPropsFingerprint = "";
 
+	// Batch selection (Ctrl/Cmd + Shift, no checkboxes)
+	private selected: Set<string> = new Set();
+	private lastSelectedIndex: number | null = null;
+	private batchBarEl!: HTMLElement;
+	private batchCountEl!: HTMLElement;
+	private batchPropertyInput!: HTMLInputElement;
+	private batchOperationSelect!: HTMLSelectElement;
+	private batchValueInput!: HTMLInputElement;
+	private batchClearLabel!: HTMLElement;
+	private batchPropertyClearBtn!: HTMLElement;
+	private batchPropertyDropBtn!: HTMLElement;
+	private pendingWritten = new Map<string, { property: string; value: unknown }>();
+
+	private pendingKey(path: string, property: string): string { return `${path}\0${property}`; }
+
 	constructor(controller: QueryController, parentEl: HTMLElement, getPluginSettings: () => MediaCompanionSettings) {
 		super(controller);
 		this.getPluginSettings = getPluginSettings;
+
+		// Batch bar sits above scroll, stays visible (not virtual-scrolled away)
+		this.batchBarEl = parentEl.createDiv({ cls: "mc-waterfall-batch-bar" });
+		this.batchBarEl.style.display = "none";
+		// Prevent Bases view from stealing focus when interacting with batch inputs
+		this.batchBarEl.addEventListener("mousedown", (e) => e.stopPropagation());
+		this.batchBarEl.addEventListener("click", (e) => e.stopPropagation());
+		this.batchCountEl = this.batchBarEl.createSpan({ cls: "mc-batch-count", text: "0 selected" });
+		const propWrap = this.batchBarEl.createDiv({ cls: "mc-batch-property-wrap" });
+		this.batchPropertyInput = propWrap.createEl("input", { cls: "mc-batch-property", attr: { placeholder: "Property (e.g. tags)", type: "text", "aria-label": "Property name" } }) as HTMLInputElement;
+		this.batchPropertyClearBtn = propWrap.createEl("button", { cls: "mc-batch-property-clear", attr: { "aria-label": "Clear property", "data-tooltip-position": "top" } });
+		setIcon(this.batchPropertyClearBtn, "x");
+		this.batchPropertyClearBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+		this.batchPropertyClearBtn.addEventListener("click", (e) => { e.stopPropagation(); this.batchPropertyInput.value = ""; this.updateBatchBar(); this.batchPropertyInput.focus(); });
+		this.batchPropertyDropBtn = propWrap.createEl("button", { cls: "mc-batch-property-drop", attr: { "aria-label": "Show properties", "data-tooltip-position": "top" } });
+		setIcon(this.batchPropertyDropBtn, "chevron-down");
+		this.batchPropertyDropBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+		this.batchPropertyDropBtn.addEventListener("click", (e) => { e.stopPropagation(); this.batchPropertyInput.focus(); this.batchPropertyInput.showPicker?.(); });
+		this.batchOperationSelect = this.batchBarEl.createEl("select", { cls: "mc-batch-operation", attr: { "aria-label": "Batch operation" } }) as HTMLSelectElement;
+		this.batchValueInput = this.batchBarEl.createEl("input", { cls: "mc-batch-value", attr: { placeholder: "Value", type: "text", "aria-label": "Property value" } }) as HTMLInputElement;
+		this.batchClearLabel = this.batchBarEl.createDiv({ cls: "mc-batch-clear-label", text: "the property will be cleared" });
+		this.batchClearLabel.style.display = "none";
+		for (const inp of [this.batchPropertyInput, this.batchValueInput]) {
+			inp.addEventListener("mousedown", (e) => e.stopPropagation());
+			inp.addEventListener("click", (e) => e.stopPropagation());
+			inp.addEventListener("keydown", (e) => e.stopPropagation());
+			inp.addEventListener("focus", (e) => e.stopPropagation());
+		}
+		this.batchOperationSelect.addEventListener("mousedown", (e) => e.stopPropagation());
+		this.batchOperationSelect.addEventListener("click", (e) => e.stopPropagation());
+		this.batchOperationSelect.addEventListener("change", () => this.updateBatchBar());
+		this.batchPropertyInput.addEventListener("input", () => this.updateBatchBar());
+		this.batchPropertyInput.addEventListener("change", () => this.updateBatchBar());
+		const replaceBtn = this.batchBarEl.createEl("button", { cls: "mc-batch-replace", text: "Apply" });
+		const clearBtn = this.batchBarEl.createEl("button", { cls: "mc-batch-clear", text: "Clear" });
+		replaceBtn.addEventListener("click", () => void this.executeBatch());
+		clearBtn.addEventListener("click", () => this.clearSelection());
+		// Allow free-text property; datalist from visible order when available
+		this.batchPropertyInput.setAttribute("list", "mc-batch-props");
+		const dl = this.batchBarEl.createEl("datalist", { attr: { id: "mc-batch-props" } });
 
 		this.scrollEl = parentEl.createDiv({ cls: "mc-waterfall-scroll" });
 		this.containerEl = this.scrollEl.createDiv({ cls: "mc-waterfall-container" });
 
 		this.scrollEl.addEventListener("scroll", () => this.scheduleSync(), { passive: true });
+		this.scrollEl.addEventListener("keydown", (e) => { if (e.key === "Escape") this.clearSelection(); });
 
 		this.resizeObserver = new ResizeObserver(() => {
 			this.relayoutInPlace();
@@ -331,6 +389,30 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		}
 
 		this.computePositions();
+		// Prune selection for items filtered out, keep bar in sync
+		if (this.selected.size > 0) {
+			const stillValid = new Set(this.layoutItems.map((i) => i.mediaFile.path));
+			for (const p of Array.from(this.selected)) {
+				if (!stillValid.has(p)) this.selected.delete(p);
+			}
+			this.updateBatchBar();
+		} else {
+			this.updateBatchBar();
+		}
+		// If Bases just delivered fresh entries that match our pending optimistic values, drop pending
+		if (this.pendingWritten.size > 0) {
+			for (const [key, pending] of Array.from(this.pendingWritten.entries())) {
+				const path = key.split("\0")[0];
+				const it = this.layoutItems.find((i) => i.mediaFile.path === path);
+				if (!it?.entry) continue;
+				try {
+					const pid = resolvePropertyId(pending.property, this.visibleProperties);
+					if (!pid) { this.pendingWritten.delete(key); continue; }
+					const cur = this.getBasesValue(it, pid);
+					if (valuesEqual(pending.property, pending.value, cur)) this.pendingWritten.delete(key);
+				} catch {}
+			}
+		}
 		this.syncDOM();
 	}
 
@@ -502,6 +584,10 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 	private mountItem(item: LayoutItem): void {
 		const el = this.containerEl.createDiv({ cls: "mc-waterfall-item" });
 		item.el = el;
+		el.setAttr("role", "button");
+		el.setAttr("tabIndex", "0");
+		el.setAttr("aria-label", item.mediaFile.basename);
+		el.setAttr("data-tooltip-position", "top");
 
 		el.style.top = `${item.y}px`;
 		el.style.left = `${item.x}px`;
@@ -521,7 +607,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		const { fullscreenMode: fsMode, fullscreenHoverDelay: fsDelay } = this.getPluginSettings();
 
 		if (fsMode !== "off") {
-			const btn = mc.createDiv({ cls: "mc-waterfall-fullscreen-btn" });
+			const btn = mc.createDiv({ cls: "mc-waterfall-fullscreen-btn", attr: { "aria-label": "Expand", "data-tooltip-position": "top", "role": "button", "tabIndex": "0" } });
 			setIcon(btn, "zoom-in");
 
 			if (fsMode === "hover") {
@@ -540,6 +626,9 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 				evt.stopPropagation();
 				this.showFullscreen(item);
 			});
+			btn.addEventListener("keydown", (evt) => {
+				if (evt.key === "Enter" || evt.key === " ") { evt.preventDefault(); evt.stopPropagation(); this.showFullscreen(item); }
+			});
 		}
 
 		if (this.showFilename) {
@@ -547,7 +636,23 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		}
 
 		if (this.showProperties && this.visibleProperties.length > 0) {
-			if (item.entry) this.renderProperties(el, item.entry);
+			// Check if any pending for this item among visibleProperties
+			let hasPending = false;
+			for (const pid of this.visibleProperties) {
+				const n = parsePropertyId(pid).name;
+				if (this.pendingWritten.has(this.pendingKey(item.mediaFile.path, n))) { hasPending = true; break; }
+			}
+			if (hasPending) {
+				const fakeEntry = {
+					getValue: (pid: BasesPropertyId) => {
+						const n = parsePropertyId(pid).name;
+						const pend = this.pendingWritten.get(this.pendingKey(item.mediaFile.path, n));
+						if (pend) return toDisplayValue(n, pend.value) as any;
+						return this.getBasesValue(item, pid) as any;
+					},
+				} as unknown as BasesEntry;
+				this.renderProperties(el, fakeEntry);
+			} else if (item.entry) this.renderProperties(el, item.entry);
 		}
 
 		// The pre-calculated itemHeight covers media + filename only.
@@ -605,33 +710,60 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			menu.showAtMouseEvent(evt);
 		});
 
+		// Apply selection outline for virtualized remounts
+		if (this.selected.has(item.mediaFile.path)) el.addClass("mc-selected");
+
 		el.addEventListener("click", (evt) => {
 			if (evt.button !== 0 && evt.button !== 1) return;
-			
 			evt.preventDefault();
 
+			const idx = this.layoutItems.indexOf(item);
+			const isCtrlCmd = Keymap.isModEvent(evt) || (evt as MouseEvent).ctrlKey || (evt as MouseEvent).metaKey;
+			const isShift = (evt as MouseEvent).shiftKey;
+
+			if (isShift && this.lastSelectedIndex !== null) {
+				const start = Math.min(this.lastSelectedIndex, idx);
+				const end = Math.max(this.lastSelectedIndex, idx);
+				for (let i = start; i <= end; i++) {
+					this.selected.add(this.layoutItems[i].mediaFile.path);
+					if (this.layoutItems[i].el) this.layoutItems[i].el!.addClass("mc-selected");
+				}
+				this.updateBatchBar();
+				return;
+			}
+			if (isCtrlCmd) {
+				if (this.selected.has(item.mediaFile.path)) {
+					this.selected.delete(item.mediaFile.path);
+					el.removeClass("mc-selected");
+				} else {
+					this.selected.add(item.mediaFile.path);
+					el.addClass("mc-selected");
+				}
+				this.lastSelectedIndex = idx;
+				this.updateBatchBar();
+				return;
+			}
+			// Plain click: if selection exists, clear it first (avoid opening while selecting)
+			if (this.selected.size > 0) {
+				this.clearSelection();
+			}
+			this.lastSelectedIndex = idx;
 			if (Keymap.isModEvent(evt)) {
 				const newLeaf = this.app.workspace.getLeaf("tab");
-				
 				void newLeaf.setViewState({
 					type: VIEW_TYPE_SIDECAR,
 					state: { file: item.mediaFile.path },
 				});
-				
 				this.app.workspace.setActiveLeaf(newLeaf, { focus: true });
 			} else {
 				void this.openInSidebar(item.mediaFile);
 			}
 		});
-
-		el.addEventListener("mouseover", (evt) => {
-			this.app.workspace.trigger("hover-link", {
-				event: evt,
-				source: "mc-waterfall",
-				hoverParent: this,
-				targetEl: el,
-				linktext: item.mediaFile.path,
-			});
+		el.addEventListener("keydown", (evt) => {
+			if (evt.key === "Enter" || evt.key === " ") {
+				evt.preventDefault();
+				void this.openInSidebar(item.mediaFile);
+			}
 		});
 
 	}
@@ -681,7 +813,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			if (embedCreator) {
 				const embedEl = mc.createDiv();
 				const embed = embedCreator({ app: this.app, containerEl: embedEl }, item.mediaFile, item.mediaFile.path);
-				// @ts-ignore – loadFile exists on embed components
+				// @ts-ignore ÔÇô loadFile exists on embed components
 				if (embed.loadFile) embed.loadFile();
 			} else {
 				mc.createDiv({ text: item.mediaFile.basename, cls: "mc-waterfall-name" });
@@ -838,7 +970,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 				tag.addEventListener("click", (evt) => {
 					evt.preventDefault();
 					evt.stopPropagation();
-					// @ts-ignore – global search for tag
+					// @ts-ignore ÔÇô global search for tag
 					this.app.internalPlugins?.getPluginById?.("global-search")?.instance?.openGlobalSearch?.(`tag:${tagText}`);
 				});
 				lastIndex = match.index + match[0].length;
@@ -890,8 +1022,6 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			new Notice(`Copied ${mediaFile.basename} to clipboard`);
 
 		} catch (e) {
-			console.error("Failed to copy media to clipboard", e);
-
 			new Notice("Failed to copy media to clipboard");
 		}
 	}
@@ -903,7 +1033,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			const img = new Image();
 			
 			img.onload = () => {
-				const canvas = document.createElement("canvas");
+				const canvas = activeDocument.createElement("canvas");
 				canvas.width = img.naturalWidth;
 				canvas.height = img.naturalHeight;
 				const ctx = canvas.getContext("2d");
@@ -936,7 +1066,6 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			this.computePositions();
 			this.syncDOM();
 		} catch (e) {
-			console.error("Failed to delete media file", e);
 			new Notice("Failed to delete file");
 		}
 	}
@@ -967,7 +1096,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 	private showFullscreen(item: LayoutItem): void {
 		if (this.fullscreenOverlay) this.dismissFullscreen();
 
-		const overlay = document.body.createDiv({ cls: "mc-waterfall-fullscreen" });
+		const overlay = activeDocument.body.createDiv({ cls: "mc-waterfall-fullscreen" });
 		this.fullscreenOverlay = overlay;
 		this.fullscreenItem = item;
 
@@ -997,7 +1126,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		const onKey = (e: KeyboardEvent) => {
 			if (e.key === "Escape") this.dismissFullscreen();
 		};
-		document.addEventListener("keydown", onKey, { once: true });
+		activeDocument.addEventListener("keydown", onKey, { once: true });
 	}
 
 	private dismissFullscreen(): void {
@@ -1030,6 +1159,214 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		});
 
 		workspace.revealLeaf(leaf);
+	}
+
+	private isArrayProperty(property: string): boolean {
+		if (property === "tags") return true;
+		const pid = resolvePropertyId(property, this.visibleProperties);
+		if (!pid) return false;
+		for (const it of this.layoutItems) {
+			try {
+				const v = this.getBasesValue(it, pid);
+				if (isListValue(v)) return true;
+			} catch {}
+		}
+		return false;
+	}
+
+	private getBasesValue(item: LayoutItem, pid: BasesPropertyId): unknown {
+		return (item.entry as unknown as { getValue: (pid: BasesPropertyId) => unknown })?.getValue?.(pid) ?? null;
+	}
+
+	private updateBatchBar(): void {
+		const n = this.selected.size;
+		this.batchCountEl.textContent = `${n} selected`;
+		this.batchBarEl.style.display = n > 0 ? "flex" : "none";
+		this.batchBarEl.style.pointerEvents = n > 0 ? "auto" : "none";
+		this.batchPropertyInput.disabled = false;
+		this.batchValueInput.disabled = false;
+		this.batchPropertyInput.readOnly = false;
+		this.batchValueInput.readOnly = false;
+		this.batchPropertyInput.style.pointerEvents = "auto";
+		this.batchValueInput.style.pointerEvents = "auto";
+		const property = this.batchPropertyInput.value.trim();
+		const hasText = property.length > 0;
+		this.batchPropertyClearBtn.style.display = hasText ? "flex" : "none";
+		this.batchPropertyDropBtn.style.display = hasText ? "none" : "flex";
+		const isArray = property ? this.isArrayProperty(property) : false;
+		{
+			const currentOp = this.batchOperationSelect.value;
+			this.batchOperationSelect.empty();
+			if (!property || isArray) {
+				for (const [v, t] of [["replace","Replace"],["append","Append"],["remove","Remove"],["fill","Fill empty"],["clear","Clear"]] as const) {
+					this.batchOperationSelect.createEl("option", { attr: { value: v }, text: t });
+				}
+			} else {
+				for (const [v, t] of [["replace","Replace"],["fill","Fill empty"],["clear","Clear"]] as const) {
+					this.batchOperationSelect.createEl("option", { attr: { value: v }, text: t });
+				}
+			}
+			if (Array.from(this.batchOperationSelect.options).some(o => o.value === currentOp)) this.batchOperationSelect.value = currentOp;
+		}
+		const op = this.batchOperationSelect.value;
+		const isClear = op === "clear";
+		this.batchValueInput.style.display = isClear ? "none" : "";
+		this.batchClearLabel.style.display = isClear ? "" : "none";
+		this.batchValueInput.placeholder = isArray ? "enter a value, or multiple separated by ," : "Enter a value";
+		const dl = this.batchBarEl.querySelector("datalist#mc-batch-props") as HTMLDataListElement | null;
+		if (dl) {
+			dl.empty();
+			if (this.visibleProperties.length > 0) {
+				for (const pid of this.visibleProperties) {
+					const parsed = parsePropertyId(pid);
+					if (parsed.name) dl.createEl("option", { attr: { value: parsed.name } });
+				}
+			} else {
+				for (const name of ["tags", "title", "description"]) dl.createEl("option", { attr: { value: name } });
+			}
+		}
+		if (n === 0) {
+			this.batchPropertyInput.value = "";
+			this.batchValueInput.value = "";
+			this.batchOperationSelect.value = "replace";
+		}
+	}
+
+	private clearSelection(): void {
+		for (const p of this.selected) {
+			const it = this.layoutItems.find((i) => i.mediaFile.path === p);
+			if (it?.el) it.el.removeClass("mc-selected");
+		}
+		this.selected.clear();
+		this.lastSelectedIndex = null;
+		this.updateBatchBar();
+	}
+
+	private async confirmBatch(count: number, property: string, value: unknown, operation: string): Promise<boolean> {
+		const paths = Array.from(this.selected);
+		return confirmBatchModal(this.app, count, property, value, operation, paths, (p) => this.layoutItems.find((x) => x.mediaFile.path === p)?.mediaFile.basename ?? p.split("/").pop() ?? p, () => {
+			if (this.selected.size > 0 && this.batchBarEl.style.display !== "none") this.batchValueInput.focus();
+		});
+	}
+
+	private async executeBatch(): Promise<void> {
+		const property = this.batchPropertyInput.value.trim();
+		const rawValue = this.batchValueInput.value.trim();
+		const operation = this.batchOperationSelect.value || "replace";
+		if (!property) { new Notice("Enter a property name"); return; }
+		if (this.selected.size === 0) { new Notice("No files selected"); return; }
+		const reserved = ["MC-size", "MC-colors", "MC-last-updated"];
+		if (reserved.includes(property)) { new Notice(`Cannot batch-edit reserved property ${property}`); return; }
+		const isArray = this.isArrayProperty(property);
+		const isClear = operation === "clear";
+		if (!isClear && !rawValue && operation !== "fill") {
+			// Allow empty string for Replace on string props (creates empty property), but not for array ops without value
+			if (isArray && operation !== "clear") { new Notice("Enter a value"); return; }
+		}
+		let value: unknown;
+		let parsedValues: string[] = [];
+		if (isClear) {
+			value = undefined;
+		} else if (isArray) {
+			parsedValues = rawValue.split(",").map((s) => s.trim()).filter(Boolean);
+			if (property === "tags") parsedValues = [...new Set(parsedValues.map((s) => s.toLowerCase()))];
+			else parsedValues = [...new Set(parsedValues)];
+			if (parsedValues.length === 0 && operation !== "clear") { new Notice("Enter a value"); return; }
+			// For Replace we set array, for Append/Remove etc we need the list
+			if (operation === "replace") value = parsedValues;
+			else value = parsedValues;
+		} else {
+			// String property: rawValue as-is (empty string allowed for Replace)
+			try {
+				const parsed = JSON.parse(rawValue);
+				if (typeof parsed === "number" || typeof parsed === "boolean") value = parsed;
+				else value = rawValue;
+			} catch { value = rawValue; }
+		}
+		const displayValue = isClear ? undefined : isArray && operation !== "replace" ? parsedValues : value;
+		if (!await this.confirmBatch(this.selected.size, property, displayValue, operation)) return;
+		const paths = Array.from(this.selected);
+		const notice = new Notice(`Updating ${paths.length} files…`, 0);
+		let done = 0, failed = 0;
+		for (const p of paths) {
+			const item = this.layoutItems.find((i) => i.mediaFile.path === p);
+			if (!item) { failed++; continue; }
+			let sidecarFile = item.sidecarFile;
+			if (!sidecarFile) {
+				sidecarFile = this.app.vault.getFileByPath(`${p}${Sidecar.EXTENSION}`) as TFile | null;
+				if (!sidecarFile) {
+					try { const created = await this.app.vault.create(`${p}${Sidecar.EXTENSION}`, ""); sidecarFile = created; item.sidecarFile = sidecarFile; } catch { failed++; continue; }
+				} else item.sidecarFile = sidecarFile;
+			}
+			try {
+				let finalForPending: unknown = undefined;
+				await this.app.fileManager.processFrontMatter(sidecarFile, (fm: Record<string, unknown>) => {
+					if (operation === "clear") { delete fm[property]; finalForPending = undefined; return; }
+					if (isArray) {
+						const curRaw = fm[property];
+						let cur: string[] = Array.isArray(curRaw) ? curRaw.map((x: any) => String(x)) : curRaw != null && curRaw !== "" ? [String(curRaw)] : [];
+						if (property === "tags") cur = cur.map((s) => s.toLowerCase());
+						const vals = parsedValues;
+						if (operation === "replace") { fm[property] = [...vals]; finalForPending = [...vals]; }
+						else if (operation === "append") {
+							const set = new Set(cur);
+							for (const v of vals) if (!set.has(v)) cur.push(v);
+							fm[property] = cur; finalForPending = [...cur];
+						} else if (operation === "remove") {
+							const rem = new Set(vals);
+							const next = cur.filter((x) => !rem.has(x));
+							fm[property] = next; finalForPending = [...next];
+						} else if (operation === "fill") {
+							if (cur.length === 0) { fm[property] = [...vals]; finalForPending = [...vals]; } else finalForPending = [...cur];
+						}
+					} else {
+						const cur = fm[property];
+						if (operation === "fill") {
+							if (cur == null || cur === "") { fm[property] = value; finalForPending = value; }
+							else finalForPending = cur;
+						} else { fm[property] = value; finalForPending = value; }
+					}
+				});
+				done++;
+				this.pendingWritten.set(this.pendingKey(p, property), { property, value: finalForPending });
+			} catch (e) { failed++; }
+			notice.setMessage(`Media Companion: ${done}/${paths.length} updated${failed ? ` (${failed} failed)` : ""}`);
+		}
+		notice.hide();
+		new Notice(`${done} files updated${failed ? ` — ${failed} failed` : ""}`);
+		try { (this.app.workspace as unknown as { trigger: (name: string) => void }).trigger("mc:batch-updated"); } catch {}
+		// Optimistic patch: update all affected tiles' prop DOM via fakeEntry that uses finalForPending,
+		// and keep pendingWritten for off-screen cards so they render correctly when scrolled into view.
+		if (this.showProperties && this.visibleProperties.length > 0) {
+			const isBatchPropVisible = this.visibleProperties.some((pid) => parsePropertyId(pid).name === property);
+			if (isBatchPropVisible) {
+				for (const p of paths) {
+					const pending = this.pendingWritten.get(this.pendingKey(p, property));
+					const optimisticVal = pending ? pending.value : value;
+					const it = this.layoutItems.find((i) => i.mediaFile.path === p);
+					// Track pending for virtual remount even if el is null (mountItem reads pendingWritten)
+					if (!it?.el) continue;
+					const old = it.el.querySelector(".mc-waterfall-props");
+					if (old) { if (it.propsHeight > 0) it.itemHeight -= it.propsHeight; old.remove(); it.propsMeasured = false; it.propsHeight = 0; }
+					const fakeEntry = {
+						getValue: (pid: BasesPropertyId) => {
+							const n = parsePropertyId(pid).name;
+							if (n === property) return toDisplayValue(property, optimisticVal) as any;
+							return this.getBasesValue(it, pid) as any;
+						},
+					} as unknown as BasesEntry;
+					this.renderProperties(it.el, fakeEntry);
+					requestAnimationFrame(() => {
+						if (!it.el || it.propsMeasured) return;
+						const propsEl = it.el!.querySelector(".mc-waterfall-props") as HTMLElement | null;
+						const h = propsEl ? propsEl.offsetHeight : 0;
+						it.propsMeasured = true; it.propsHeight = h;
+						if (h > 0) { const newH = it.itemHeight + h; it.el!.style.height = `${newH}px`; this.reflowColumn(it, newH); }
+					});
+				}
+			}
+		}
+		this.clearSelection();
 	}
 
 	/**
@@ -1107,7 +1444,7 @@ export function getWaterfallViewOptions(): any[] {
 					key: "searchQuery",
 					displayName: "Search",
 					default: "",
-					placeholder: "Filter by name or path…",
+					placeholder: "Filter by name or pathÔÇª",
 					instant: true,
 				},
 			],

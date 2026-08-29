@@ -204,12 +204,15 @@ export class SidecarView extends FileView {
 				cls: "mc-media-element",
 			});
 			// Vanilla-like zoom button (same icon/behaviour as note live-preview overlay)
-			const btn = this.mediaContainerEl.createDiv({ cls: "mc-sidecar-zoom-btn", attr: { "aria-label": "Inzoomen" } });
+			const btn = this.mediaContainerEl.createDiv({ cls: "mc-sidecar-zoom-btn", attr: { "aria-label": "Inzoomen", "data-tooltip-position": "top", "role": "button", "tabIndex": "0" } });
 			setIcon(btn, "zoom-in");
 			btn.addEventListener("click", (e) => {
 				e.preventDefault();
 				e.stopPropagation();
 				this.showFullscreen(file);
+			});
+			btn.addEventListener("keydown", (e) => {
+				if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); this.showFullscreen(file); }
 			});
 		} else if (mediaType === MediaTypes.Video) {
 			this.mediaContainerEl.createEl("video", {
@@ -344,7 +347,7 @@ export class SidecarView extends FileView {
 
 	private showFullscreen(file: TFile): void {
 		if (this.fullscreenOverlay) this.dismissFullscreen();
-		const overlay = document.body.createDiv({ cls: "mc-sidecar-fullscreen" });
+		const overlay = activeDocument.body.createDiv({ cls: "mc-sidecar-fullscreen" });
 		this.fullscreenOverlay = overlay;
 		const resourcePath = this.app.vault.getResourcePath(file);
 		const mediaType = getMediaType(file.extension);
@@ -356,7 +359,7 @@ export class SidecarView extends FileView {
 		}
 		overlay.addEventListener("click", () => this.dismissFullscreen());
 		const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") this.dismissFullscreen(); };
-		document.addEventListener("keydown", onKey, { once: true });
+		activeDocument.addEventListener("keydown", onKey, { once: true });
 	}
 
 	private dismissFullscreen(): void {

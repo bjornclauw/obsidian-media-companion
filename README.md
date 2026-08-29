@@ -17,6 +17,15 @@ Search through your files based on folders, tags, or file types.
 
 More complex searching can also be done, like searching by color (**without** use of AI!). You can see the plugin in action [here.](https://www.youtube.com/watch?v=RBByEOAPmYc)
 
+### Waterfall batch edit
+
+In the waterfall Bases view (`mc-waterfall`) you can `Ctrl/Cmd`-click and `Shift`-click to multi-select cards. A sticky batch bar above the grid lets you pick a frontmatter property (autocomplete from visible columns, `X` to clear, `▾` to show all), choose an operation and enter a value:
+
+- **Lists** (`tags`, any `ListValue` column): `Replace` (orange), `Append`/`Remove` (blue/red), `Fill empty`, `Clear` (red)
+- **Scalars**: `Replace` (orange), `Fill empty`, `Clear` (red)
+
+Values are deduped (`a, b`) and written via `processFrontMatter` (sidecar created if missing, `MC-*` reserved). A confirmation modal previews the operation, value (`#tag` for tags) and the first 5 affected files (`and N more…`). Off-screen selected cards are optimistically updated and stay in sync when scrolled into view.
+
 *Art shown in the images and video is from [this dataset of Van Gogh paintings](https://www.kaggle.com/datasets/ipythonx/van-gogh-paintings)*
 
 ## Planned features
