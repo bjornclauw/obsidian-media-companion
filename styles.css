@@ -304,7 +304,7 @@
 	white-space: nowrap;
 }
 
-/* Note image overlay ÔåÆ open sidecar in sidebar */
+/* Note image overlay Ã”Ã¥Ã† open sidecar in sidebar */
 .mc-note-image-container {
 	position: relative;
 }
@@ -339,7 +339,7 @@
 	background: rgba(0, 0, 0, 0.75);
 }
 
-/* Waterfall batch bar + selection — avoid !important via source order */
+/* Waterfall batch bar + selection â€” avoid !important via source order */
 .bases-view[data-view-type="mc-waterfall"] {
 	display: flex;
 	flex-direction: column;
@@ -388,15 +388,15 @@
 	align-items: center;
 	flex-shrink: 0;
 }
-.mc-batch-property { width: 100%; padding-right: 22px; -webkit-appearance: none; appearance: none; }
+.mc-batch-property { width: 100%; padding-right: 44px; -webkit-appearance: none; appearance: none; }
 .mc-batch-property::-webkit-calendar-picker-indicator { display: none; opacity: 0; }
 .mc-batch-property::-webkit-list-button { display: none; }
 .mc-batch-property-clear,
 .mc-batch-property-drop {
 	position: absolute;
-	right: 4px;
-	width: 24px;
-	height: 24px;
+	right: 0;
+	width: 44px;
+	height: 44px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -448,7 +448,8 @@
 .mc-batch-replace { background: var(--interactive-accent); color: var(--text-on-accent); border: none; }
 .mc-batch-replace:disabled { opacity: 0.5; cursor: not-allowed; }
 .mc-batch-clear { background: var(--background-modifier-hover); border: 1px solid var(--background-modifier-border); }
-.mc-batch-value-invalid { border-color: var(--text-error) !important; box-shadow: 0 0 0 1px var(--text-error); }
+.bases-view[data-view-type="mc-waterfall"] .mc-batch-value.mc-batch-value-invalid,
+.bases-view[data-view-type="mc-waterfall"] .mc-batch-property.mc-batch-value-invalid { border-color: var(--text-error); box-shadow: 0 0 0 1px var(--text-error); }
 .mc-waterfall-item.mc-selected {
 	outline: none;
 }

@@ -1,6 +1,6 @@
 import { ListValue, parsePropertyId, type BasesPropertyId } from "obsidian";
 
-/** Helpers for batch edit — extracted for file-size discipline and dedup. */
+/** Helpers for batch edit â€” extracted for file-size discipline and dedup. */
 
 /** Normalize tag strings: strip leading "#", trim, lower-case. */
 export function normalizeTag(tag: string): string {
@@ -61,7 +61,7 @@ export function valuesEqual(property: string, pendingVal: unknown, cur: unknown)
 /** Resolve BasesPropertyId for a plain property name within current base visibleProperties. */
 export function resolvePropertyId(property: string, visibleProperties: BasesPropertyId[]): BasesPropertyId | null {
 	for (const pid of visibleProperties) {
-		try { if (parsePropertyId(pid).name === property) return pid; } catch {}
+		try { if (parsePropertyId(pid).name === property) return pid; } catch (_e) { void _e; }
 	}
 	return null;
 }
@@ -95,10 +95,6 @@ function isDateValue(val: unknown): boolean {
 	const n = valueClassName(val);
 	return n === "DateValue" || n === "RelativeDateValue" || n === "DurationValue";
 }
-function isStringValue(val: unknown): boolean {
-	const n = valueClassName(val);
-	return n === "StringValue" || n === "TagValue" || n === "UrlValue" || n === "LinkValue" || n === "FileValue" || typeof val === "string";
-}
 
 /**
  * Infer PropertyKind from a sample of actual stored values (Bases Value or raw frontmatter).
@@ -130,7 +126,7 @@ export function detectPropertyKind(property: string, visibleProperties: BasesPro
 		const hasTime = nonEmpty.some((v) => String(v).includes("T") || String(v).includes(":"));
 		return hasTime ? "datetime" : "date";
 	}
-	// Numeric strings like "42", "-3.14", "1e5" — treat as number if all samples are numeric-like
+	// Numeric strings like "42", "-3.14", "1e5" â€” treat as number if all samples are numeric-like
 	const allNumberLike = nonEmpty.every((v) => typeof v === "string" && /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(String(v).trim()));
 	if (allNumberLike && nonEmpty.length > 0) return "number";
 	// Boolean strings "true"/"false"

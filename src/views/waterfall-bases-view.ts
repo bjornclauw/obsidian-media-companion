@@ -1,4 +1,5 @@
-import { BasesView, Keymap, Menu, Notice, parsePropertyId, TFolder, setIcon, type BasesPropertyId, type QueryController, type HoverParent, type HoverPopover, type TFile, type BasesEntry, type WorkspaceLeaf } from "obsidian";
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-non-null-assertion -- batch edit uses dynamic vault APIs and DOM helpers where strict types add noise */
+import { BasesView, Keymap, Menu, Notice, parsePropertyId, Platform, TFolder, setIcon, type BasesPropertyId, type QueryController, type HoverParent, type HoverPopover, type TFile, type BasesEntry, type WorkspaceLeaf } from "obsidian";
 import { allowedOperations, detectPropertyKind, inputConfigForKind, isListValue, isValidRawForKind, parseRawForKind, resolvePropertyId, toDisplayValue, valuesEqual, type PropertyKind } from "./waterfall-batch";
 import { confirmBatchModal } from "./waterfall-batch-modal";
 import Sidecar from "../model/sidecar";
@@ -57,7 +58,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 	private offsetX = 0;
 	private rafId: number | null = null;
 
-	private hoverTimer: ReturnType<typeof setTimeout> | null = null;
+	private hoverTimer: number | null = null;
 	private fullscreenOverlay: HTMLElement | null = null;
 	private fullscreenItem: LayoutItem | null = null;
 	private settingsChangedRef: (() => void) | null = null;
@@ -89,11 +90,15 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 	private pendingKey(path: string, property: string): string { return `${path}\0${property}`; }
 
 	private loadVaultTypes(): void {
+		if (!Platform.isDesktop) {
+			if (!this.cachedTypes) this.cachedTypes = {};
+			return;
+		}
 		try {
 			const basePath = (this.app.vault.adapter as unknown as { getBasePath?: () => string }).getBasePath?.();
 			if (basePath) {
-				const fs = (window as unknown as { require?: (id: string) => unknown }).require?.("fs") as unknown as { existsSync: (p: string) => boolean; readFileSync: (p: string, e: string) => string } | undefined;
-				const path = (window as unknown as { require?: (id: string) => unknown }).require?.("path") as unknown as { join: (...p: string[]) => string } | undefined;
+				const fs = (activeWindow as unknown as { require?: (id: string) => unknown }).require?.("fs") as unknown as { existsSync: (p: string) => boolean; readFileSync: (p: string, e: string) => string } | undefined;
+				const path = (activeWindow as unknown as { require?: (id: string) => unknown }).require?.("path") as unknown as { join: (...p: string[]) => string } | undefined;
 				if (fs && path) {
 					const typesPath = path.join(basePath, ".obsidian", "types.json");
 					if (fs.existsSync(typesPath)) {
@@ -103,7 +108,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 					}
 				}
 			}
-		} catch {}
+		} catch (_e) { void _e; }
 		// Fallback: try to populate from already-known types via layout samples if still null
 		if (!this.cachedTypes) this.cachedTypes = {};
 	}
@@ -131,19 +136,19 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		this.batchBarEl = parentEl.createDiv({ cls: "mc-waterfall-batch-bar" });
 		this.batchBarEl.style.display = "none";
 		// Prevent Bases view from stealing focus when interacting with batch inputs
-		this.batchBarEl.addEventListener("mousedown", (e) => e.stopPropagation());
-		this.batchBarEl.addEventListener("click", (e) => e.stopPropagation());
+		this.registerDomEvent(this.batchBarEl, "mousedown", (e) => e.stopPropagation());
+		this.registerDomEvent(this.batchBarEl, "click", (e) => e.stopPropagation());
 		this.batchCountEl = this.batchBarEl.createSpan({ cls: "mc-batch-count", text: "0 selected" });
 		const propWrap = this.batchBarEl.createDiv({ cls: "mc-batch-property-wrap" });
 		this.batchPropertyInput = propWrap.createEl("input", { cls: "mc-batch-property", attr: { placeholder: "Property (e.g. tags)", type: "text", "aria-label": "Property name" } }) as HTMLInputElement;
 		this.batchPropertyClearBtn = propWrap.createEl("button", { cls: "mc-batch-property-clear", attr: { "aria-label": "Clear property", "data-tooltip-position": "top" } });
 		setIcon(this.batchPropertyClearBtn, "x");
-		this.batchPropertyClearBtn.addEventListener("mousedown", (e) => e.stopPropagation());
-		this.batchPropertyClearBtn.addEventListener("click", (e) => { e.stopPropagation(); this.batchPropertyInput.value = ""; this.updateBatchBar(); this.batchPropertyInput.focus(); });
+		this.registerDomEvent(this.batchPropertyClearBtn, "mousedown", (e) => e.stopPropagation());
+		this.registerDomEvent(this.batchPropertyClearBtn, "click", (e) => { e.stopPropagation(); this.batchPropertyInput.value = ""; this.updateBatchBar(); this.batchPropertyInput.focus(); });
 		this.batchPropertyDropBtn = propWrap.createEl("button", { cls: "mc-batch-property-drop", attr: { "aria-label": "Show properties", "data-tooltip-position": "top" } });
 		setIcon(this.batchPropertyDropBtn, "chevron-down");
-		this.batchPropertyDropBtn.addEventListener("mousedown", (e) => e.stopPropagation());
-		this.batchPropertyDropBtn.addEventListener("click", (e) => { e.stopPropagation(); this.batchPropertyInput.focus(); this.batchPropertyInput.showPicker?.(); });
+		this.registerDomEvent(this.batchPropertyDropBtn, "mousedown", (e) => e.stopPropagation());
+		this.registerDomEvent(this.batchPropertyDropBtn, "click", (e) => { e.stopPropagation(); this.batchPropertyInput.focus(); this.batchPropertyInput.showPicker?.(); });
 		this.batchOperationSelect = this.batchBarEl.createEl("select", { cls: "mc-batch-operation", attr: { "aria-label": "Batch operation" } }) as HTMLSelectElement;
 		this.batchValueInput = this.batchBarEl.createEl("input", { cls: "mc-batch-value", attr: { placeholder: "Value", type: "text", "aria-label": "Property value" } }) as HTMLInputElement;
 		this.batchBooleanSelect = this.batchBarEl.createEl("select", { cls: "mc-batch-value", attr: { "aria-label": "Boolean value" } }) as HTMLSelectElement;
@@ -153,16 +158,16 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		this.batchClearLabel = this.batchBarEl.createDiv({ cls: "mc-batch-clear-label", text: "the property will be cleared" });
 		this.batchClearLabel.style.display = "none";
 		for (const inp of [this.batchPropertyInput, this.batchValueInput, this.batchBooleanSelect]) {
-			inp.addEventListener("mousedown", (e) => e.stopPropagation());
-			inp.addEventListener("click", (e) => e.stopPropagation());
-			inp.addEventListener("focus", (e) => e.stopPropagation());
+			this.registerDomEvent(inp, "mousedown", (e) => e.stopPropagation());
+			this.registerDomEvent(inp, "click", (e) => e.stopPropagation());
+			this.registerDomEvent(inp, "focus", (e) => e.stopPropagation());
 		}
-		this.batchOperationSelect.addEventListener("mousedown", (e) => e.stopPropagation());
-		this.batchOperationSelect.addEventListener("click", (e) => e.stopPropagation());
-		this.batchOperationSelect.addEventListener("change", () => this.updateBatchBar());
-		this.batchPropertyInput.addEventListener("input", () => this.updateBatchBar());
-		this.batchPropertyInput.addEventListener("change", () => this.updateBatchBar());
-		this.batchPropertyInput.addEventListener("keydown", (e) => {
+		this.registerDomEvent(this.batchOperationSelect, "mousedown", (e) => e.stopPropagation());
+		this.registerDomEvent(this.batchOperationSelect, "click", (e) => e.stopPropagation());
+		this.registerDomEvent(this.batchOperationSelect, "change", () => this.updateBatchBar());
+		this.registerDomEvent(this.batchPropertyInput, "input", () => this.updateBatchBar());
+		this.registerDomEvent(this.batchPropertyInput, "change", () => this.updateBatchBar());
+		this.registerDomEvent(this.batchPropertyInput, "keydown", (e) => {
 			e.stopPropagation();
 			if (e.key === "Enter") {
 				e.preventDefault();
@@ -170,16 +175,16 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 				if (this.batchPropertyInput.value.trim()) this.batchValueInput.focus();
 			}
 		});
-		this.batchValueInput.addEventListener("input", () => this.updateBatchBar());
-		this.batchValueInput.addEventListener("keydown", (e) => {
+		this.registerDomEvent(this.batchValueInput, "input", () => this.updateBatchBar());
+		this.registerDomEvent(this.batchValueInput, "keydown", (e) => {
 			e.stopPropagation();
 			if (e.key === "Enter") {
 				e.preventDefault();
 				if (!this.batchApplyBtn.disabled) void this.executeBatch();
 			}
 		});
-		this.batchBooleanSelect.addEventListener("change", () => this.updateBatchBar());
-		this.batchBooleanSelect.addEventListener("keydown", (e) => {
+		this.registerDomEvent(this.batchBooleanSelect, "change", () => this.updateBatchBar());
+		this.registerDomEvent(this.batchBooleanSelect, "keydown", (e) => {
 			e.stopPropagation();
 			if (e.key === "Enter") {
 				e.preventDefault();
@@ -188,20 +193,20 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		});
 		this.batchApplyBtn = this.batchBarEl.createEl("button", { cls: "mc-batch-replace", text: "Apply" }) as HTMLButtonElement;
 		const clearBtn = this.batchBarEl.createEl("button", { cls: "mc-batch-clear", text: "Clear" });
-		this.batchApplyBtn.addEventListener("click", () => {
+		this.registerDomEvent(this.batchApplyBtn, "click", () => {
 			if (this.batchApplyBtn.disabled) return;
 			void this.executeBatch();
 		});
-		clearBtn.addEventListener("click", () => this.clearSelection());
+		this.registerDomEvent(clearBtn, "click", () => this.clearSelection());
 		// Allow free-text property; datalist from visible order when available
 		this.batchPropertyInput.setAttribute("list", "mc-batch-props");
-		const dl = this.batchBarEl.createEl("datalist", { attr: { id: "mc-batch-props" } });
+		this.batchBarEl.createEl("datalist", { attr: { id: "mc-batch-props" } });
 
 		this.scrollEl = parentEl.createDiv({ cls: "mc-waterfall-scroll" });
 		this.containerEl = this.scrollEl.createDiv({ cls: "mc-waterfall-container" });
 
-		this.scrollEl.addEventListener("scroll", () => this.scheduleSync(), { passive: true });
-		this.scrollEl.addEventListener("keydown", (e) => { if (e.key === "Escape") this.clearSelection(); });
+		this.registerDomEvent(this.scrollEl, "scroll", () => this.scheduleSync(), { passive: true });
+		this.registerDomEvent(this.scrollEl, "keydown", (e) => { if (e.key === "Escape") this.clearSelection(); });
 
 		this.resizeObserver = new ResizeObserver(() => {
 			this.relayoutInPlace();
@@ -209,12 +214,12 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		this.resizeObserver.observe(this.scrollEl);
 
 		this.settingsChangedRef = () => this.refreshVisibleItems();
-		this.app.workspace.on("mc:settings-changed" as any, this.settingsChangedRef);
+		this.registerEvent(this.app.workspace.on("mc:settings-changed" as any, this.settingsChangedRef));
 	}
 
 	private scheduleSync(): void {
 		if (this.rafId !== null) return;
-		this.rafId = requestAnimationFrame(() => {
+		this.rafId = activeWindow.requestAnimationFrame(() => {
 			this.rafId = null;
 			this.syncDOM();
 		});
@@ -481,7 +486,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 					if (!pid) { this.pendingWritten.delete(key); continue; }
 					const cur = this.getBasesValue(it, pid);
 					if (valuesEqual(pending.property, pending.value, cur)) this.pendingWritten.delete(key);
-				} catch {}
+				} catch (_e) { void _e; }
 			}
 		}
 		this.syncDOM();
@@ -573,7 +578,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 
 		// Re-enable transitions after the browser has painted the new positions.
 		if (!animate) {
-			requestAnimationFrame(() => {
+			activeWindow.requestAnimationFrame(() => {
 				this.containerEl.classList.remove("mc-no-transition");
 			});
 		}
@@ -610,7 +615,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 	 * so the layout adjusts to the new content.
 	 */
 	private measureMountedProps(): void {
-		requestAnimationFrame(() => {
+		activeWindow.requestAnimationFrame(() => {
 			for (const item of this.layoutItems) {
 				if (item.propsMeasured || !item.el) continue;
 				const propsEl = item.el.querySelector(".mc-waterfall-props") as HTMLElement | null;
@@ -684,7 +689,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			if (fsMode === "hover") {
 				btn.addEventListener("mouseenter", () => {
 					this.clearHoverTimer();
-					this.hoverTimer = setTimeout(() => {
+					this.hoverTimer = activeWindow.setTimeout(() => {
 						this.showFullscreen(item);
 					}, fsDelay);
 				});
@@ -733,7 +738,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			// Allow overflow so the props are laid out at their natural
 			// height even though the explicit item height is too short.
 			el.style.overflow = "visible";
-			requestAnimationFrame(() => {
+			activeWindow.requestAnimationFrame(() => {
 				if (!item.el || item.propsMeasured) return;
 				const propsEl = item.el.querySelector(".mc-waterfall-props") as HTMLElement | null;
 				const propsH = propsEl ? propsEl.offsetHeight : 0;
@@ -884,7 +889,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			if (embedCreator) {
 				const embedEl = mc.createDiv();
 				const embed = embedCreator({ app: this.app, containerEl: embedEl }, item.mediaFile, item.mediaFile.path);
-				// @ts-ignore ÔÇô loadFile exists on embed components
+				// @ts-ignore Ã”Ã‡Ã´ loadFile exists on embed components
 				if (embed.loadFile) embed.loadFile();
 			} else {
 				mc.createDiv({ text: item.mediaFile.basename, cls: "mc-waterfall-name" });
@@ -1041,7 +1046,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 				tag.addEventListener("click", (evt) => {
 					evt.preventDefault();
 					evt.stopPropagation();
-					// @ts-ignore ÔÇô global search for tag
+					// @ts-ignore Ã”Ã‡Ã´ global search for tag
 					this.app.internalPlugins?.getPluginById?.("global-search")?.instance?.openGlobalSearch?.(`tag:${tagText}`);
 				});
 				lastIndex = match.index + match[0].length;
@@ -1058,7 +1063,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			a.addEventListener("click", (evt) => {
 				evt.preventDefault();
 				evt.stopPropagation();
-				window.open(text, "_blank");
+				activeWindow.open(text, "_blank");
 			});
 			return;
 		}
@@ -1159,7 +1164,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 
 	private clearHoverTimer(): void {
 		if (this.hoverTimer !== null) {
-			clearTimeout(this.hoverTimer);
+			activeWindow.clearTimeout(this.hoverTimer);
 			this.hoverTimer = null;
 		}
 	}
@@ -1240,7 +1245,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			try {
 				const v = this.getBasesValue(it, pid);
 				if (isListValue(v)) return true;
-			} catch {}
+			} catch (_e) { void _e; }
 		}
 		return false;
 	}
@@ -1259,7 +1264,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 				try {
 					const v = this.getBasesValue(it, pid);
 					if (v != null && String(v) !== "" && String(v) !== "null") samples.push(v);
-				} catch {}
+				} catch (_e) { void _e; }
 			}
 		}
 		if (samples.length === 0) {
@@ -1280,7 +1285,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 	}
 
 	private getPropertyKind(property: string): PropertyKind {
-		// 1) Vault-declared type (types.json) is authoritative — handles empty props
+		// 1) Vault-declared type (types.json) is authoritative â€” handles empty props
 		if (this.cachedTypes && property in this.cachedTypes) {
 			const k = this.vaultTypeToKind(this.cachedTypes[property]);
 			if (k) return k;
@@ -1308,7 +1313,6 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		this.batchPropertyDropBtn.style.display = hasText ? "none" : "flex";
 		this.currentKind = property ? this.getPropertyKind(property) : "text";
 		const kind = this.currentKind;
-		const isArray = kind === "list";
 		{
 			const currentOp = this.batchOperationSelect.value;
 			this.batchOperationSelect.empty();
@@ -1334,7 +1338,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			this.batchBooleanSelect.style.display = "none";
 			this.batchValueInput.style.display = "";
 			// Switch input type safely (avoid invalid type switch throwing)
-			try { (this.batchValueInput as HTMLInputElement).type = cfg.type === "select" ? "text" : cfg.type; } catch {}
+			try { (this.batchValueInput as HTMLInputElement).type = cfg.type === "select" ? "text" : cfg.type; } catch (_e) { void _e; }
 			this.batchValueInput.placeholder = cfg.placeholder;
 			if (kind === "number") this.batchValueInput.step = "any";
 			else this.batchValueInput.removeAttribute("step");
@@ -1349,7 +1353,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			if (needsValue && !raw) {
 				// Empty not allowed for replace/append/remove on non-text? Text replace allows empty to clear? But we require value for boolean/number/date/list.
 				if (kind !== "text") { invalid = true; reason = "Enter a value"; }
-				// For text replace, empty is allowed (user may want to set empty string) — keep valid
+				// For text replace, empty is allowed (user may want to set empty string) â€” keep valid
 			} else if (raw) {
 				const check = isValidRawForKind(kind, raw);
 				if (!check.valid) { invalid = true; reason = check.reason ?? "Invalid value"; }
@@ -1423,13 +1427,13 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		if (this.selected.size === 0) { new Notice("No files selected"); return; }
 		const reserved = ["MC-size", "MC-colors", "MC-last-updated"];
 		if (reserved.includes(property)) { new Notice(`Cannot batch-edit reserved property ${property}`); return; }
-		// Disallow editing of read-only Bases types (file.* and formula.*) — only note.* (frontmatter) is editable
+		// Disallow editing of read-only Bases types (file.* and formula.*) â€” only note.* (frontmatter) is editable
 		const pidCheck = resolvePropertyId(property, this.visibleProperties);
 		if (pidCheck) {
 			try {
 				const parsed = parsePropertyId(pidCheck);
 				if (parsed.type !== "note") { new Notice(`Property '${property}' is ${parsed.type} (read-only) and cannot be batch-edited`); return; }
-			} catch {}
+			} catch (_e) { void _e; }
 		}
 		const isArray = kind === "list";
 		const isClear = operation === "clear";
@@ -1441,7 +1445,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		}
 		if (!isClear && !rawValue && operation !== "fill") {
 			if (kind !== "text") { new Notice("Enter a value"); return; }
-			// Text replace may allow empty string — fall through
+			// Text replace may allow empty string â€” fall through
 		}
 		if (!isClear && rawValue) {
 			const check = isValidRawForKind(kind, rawValue);
@@ -1470,7 +1474,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		const displayValue = isClear ? undefined : isArray && operation !== "replace" ? parsedValues : value;
 		if (!await this.confirmBatch(this.selected.size, property, displayValue, operation)) return;
 		const paths = Array.from(this.selected);
-		const notice = new Notice(`Updating ${paths.length} files…`, 0);
+		const notice = new Notice(`Updating ${paths.length} filesâ€¦`, 0);
 		let done = 0, failed = 0;
 		for (const p of paths) {
 			const item = this.layoutItems.find((i) => i.mediaFile.path === p);
@@ -1517,8 +1521,8 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 			notice.setMessage(`Media Companion: ${done}/${paths.length} updated${failed ? ` (${failed} failed)` : ""}`);
 		}
 		notice.hide();
-		new Notice(`${done} files updated${failed ? ` — ${failed} failed` : ""}`);
-		try { (this.app.workspace as unknown as { trigger: (name: string) => void }).trigger("mc:batch-updated"); } catch {}
+		new Notice(`${done} files updated${failed ? ` â€” ${failed} failed` : ""}`);
+		try { (this.app.workspace as unknown as { trigger: (name: string) => void }).trigger("mc:batch-updated"); } catch (_e) { void _e; }
 		// Optimistic patch: update all affected tiles' prop DOM via fakeEntry that uses finalForPending,
 		// and keep pendingWritten for off-screen cards so they render correctly when scrolled into view.
 		if (this.showProperties && this.visibleProperties.length > 0) {
@@ -1540,7 +1544,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 						},
 					} as unknown as BasesEntry;
 					this.renderProperties(it.el, fakeEntry);
-					requestAnimationFrame(() => {
+					activeWindow.requestAnimationFrame(() => {
 						if (!it.el || it.propsMeasured) return;
 						const propsEl = it.el!.querySelector(".mc-waterfall-props") as HTMLElement | null;
 						const h = propsEl ? propsEl.offsetHeight : 0;
@@ -1568,13 +1572,10 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 	}
 
 	onunload(): void {
-		if (this.rafId !== null) cancelAnimationFrame(this.rafId);
+		if (this.rafId !== null) activeWindow.cancelAnimationFrame(this.rafId);
 		this.clearHoverTimer();
 		this.dismissFullscreen();
 		this.resizeObserver.disconnect();
-		if (this.settingsChangedRef) {
-			this.app.workspace.off("mc:settings-changed" as any, this.settingsChangedRef);
-		}
 		this.clearDOM();
 	}
 }
@@ -1628,7 +1629,7 @@ export function getWaterfallViewOptions(): any[] {
 					key: "searchQuery",
 					displayName: "Search",
 					default: "",
-					placeholder: "Filter by name or pathÔÇª",
+					placeholder: "Filter by name or pathÃ”Ã‡Âª",
 					instant: true,
 				},
 			],
