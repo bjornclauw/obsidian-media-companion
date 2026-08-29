@@ -1429,7 +1429,8 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		if (reserved.includes(property)) { new Notice(`Cannot batch-edit reserved property ${property}`); return; }
 		// Disallow editing of read-only Bases types (file.* and formula.*) â€” only note.* (frontmatter) is editable
 		const pidCheck = resolvePropertyId(property, this.visibleProperties);
-		if (pidCheck) {
+		// tags is always editable (frontmatter) even when Base shows file.tags
+		if (pidCheck && property !== "tags") {
 			try {
 				const parsed = parsePropertyId(pidCheck);
 				if (parsed.type !== "note") { new Notice(`Property '${property}' is ${parsed.type} (read-only) and cannot be batch-edited`); return; }
