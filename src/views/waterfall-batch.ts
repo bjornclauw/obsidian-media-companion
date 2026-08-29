@@ -58,12 +58,21 @@ export function valuesEqual(property: string, pendingVal: unknown, cur: unknown)
 	return String(cur) === String(pendingVal);
 }
 
-/** Resolve BasesPropertyId for a plain property name within current base visibleProperties. */
+/** Resolve BasesPropertyId for a plain property name within current base visibleProperties.
+ *  Prefers note.* over file/formula.* so editable frontmatter wins over read-only derived properties
+ *  (e.g. tags exists as both note.tags and file.tags — we must return note.tags). */
 export function resolvePropertyId(property: string, visibleProperties: BasesPropertyId[]): BasesPropertyId | null {
+	let fallback: BasesPropertyId | null = null;
 	for (const pid of visibleProperties) {
-		try { if (parsePropertyId(pid).name === property) return pid; } catch (_e) { void _e; }
+		try {
+			const parsed = parsePropertyId(pid);
+			if (parsed.name === property) {
+				if (parsed.type === "note") return pid;
+				if (!fallback) fallback = pid;
+			}
+		} catch (_e) { void _e; }
 	}
-	return null;
+	return fallback;
 }
 
 /** Check if a Value is list-like (ListValue or raw array). */
