@@ -19,12 +19,14 @@ More complex searching can also be done, like searching by color (**without** us
 
 ### Waterfall batch edit
 
-In the waterfall Bases view (`mc-waterfall`) you can `Ctrl/Cmd`-click and `Shift`-click to multi-select cards. A sticky batch bar above the grid lets you pick a frontmatter property (autocomplete from visible columns, `X` to clear, `▾` to show all), choose an operation and enter a value:
+In the waterfall Bases view (`mc-waterfall`) you can `Ctrl/Cmd`-click and `Shift`-click to multi-select cards. A sticky batch bar above the grid lets you pick a frontmatter property (autocomplete from visible `note.*` columns, `X` to clear, `▾` to show all), choose an operation and enter a value. The bar is type-aware:
 
-- **Lists** (`tags`, any `ListValue` column): `Replace` (orange), `Append`/`Remove` (blue/red), `Fill empty`, `Clear` (red)
-- **Scalars**: `Replace` (orange), `Fill empty`, `Clear` (red)
+- **Detection:** `types.json` (`checkbox→boolean`, `number→number`, `date→date`, `multitext/aliases/tags→list`) plus sampling of `ListValue`/`NumberValue`/`BooleanValue`/`DateValue` and raw frontmatter; `tags` is always a list
+- **Input per kind:** `list` → CSV text (`a, b, c`), `number` → `type=number` (`Enter a number`), `boolean` → dropdown `true`/`false`, `date` → `type=date` (`YYYY-MM-DD`), `datetime` → `datetime-local` (`YYYY-MM-DD HH:mm`), `text` → text
+- **Validation:** input is checked via `isValidRawForKind`; invalid input shows a red border and tooltip and disables **Apply** (`opacity 0.5`, `Enter`/click blocked) until correct; `file`/`formula` properties are blocked as read-only (except `tags` which always edits `note.tags`)
+- **Operations:** `list` → `Replace` (orange), `Append`/`Remove` (blue/red), `Fill empty`, `Clear` (red); others → `Replace` (orange), `Fill empty`, `Clear` (red)
 
-Values are deduped (`a, b`) and written via `processFrontMatter` (sidecar created if missing, `MC-*` reserved). A confirmation modal previews the operation, value (`#tag` for tags) and the first 5 affected files (`and N more…`). Off-screen selected cards are optimistically updated and stay in sync when scrolled into view.
+Values are deduped and normalized (`tags` lower-cased, `#` stripped) and written via `fileManager.processFrontMatter` (sidecar `*.md` created if missing, `MC-*` reserved). A confirmation modal previews the operation, value (`#tag` for tags) and the first 5 affected files (`and N more…`). Off-screen selected cards use an optimistic `pendingWritten` map and re-render when scrolled into view.
 
 *Art shown in the images and video is from [this dataset of Van Gogh paintings](https://www.kaggle.com/datasets/ipythonx/van-gogh-paintings)*
 
