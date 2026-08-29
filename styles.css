@@ -446,7 +446,9 @@
 	font-size: 0.85em;
 }
 .mc-batch-replace { background: var(--interactive-accent); color: var(--text-on-accent); border: none; }
+.mc-batch-replace:disabled { opacity: 0.5; cursor: not-allowed; }
 .mc-batch-clear { background: var(--background-modifier-hover); border: 1px solid var(--background-modifier-border); }
+.mc-batch-value-invalid { border-color: var(--text-error) !important; box-shadow: 0 0 0 1px var(--text-error); }
 .mc-waterfall-item.mc-selected {
 	outline: none;
 }

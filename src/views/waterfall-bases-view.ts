@@ -1,5 +1,5 @@
 import { BasesView, Keymap, Menu, Notice, parsePropertyId, TFolder, setIcon, type BasesPropertyId, type QueryController, type HoverParent, type HoverPopover, type TFile, type BasesEntry, type WorkspaceLeaf } from "obsidian";
-import { isListValue, resolvePropertyId, toDisplayValue, valuesEqual } from "./waterfall-batch";
+import { allowedOperations, detectPropertyKind, inputConfigForKind, isListValue, isValidRawForKind, parseRawForKind, resolvePropertyId, toDisplayValue, valuesEqual, type PropertyKind } from "./waterfall-batch";
 import { confirmBatchModal } from "./waterfall-batch-modal";
 import Sidecar from "../model/sidecar";
 import { getMediaType, MediaTypes } from "../model/types/mediaTypes";
@@ -77,16 +77,55 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 	private batchPropertyInput!: HTMLInputElement;
 	private batchOperationSelect!: HTMLSelectElement;
 	private batchValueInput!: HTMLInputElement;
+	private batchBooleanSelect!: HTMLSelectElement;
+	private batchApplyBtn!: HTMLButtonElement;
 	private batchClearLabel!: HTMLElement;
 	private batchPropertyClearBtn!: HTMLElement;
 	private batchPropertyDropBtn!: HTMLElement;
 	private pendingWritten = new Map<string, { property: string; value: unknown }>();
+	private currentKind: PropertyKind = "text";
+	private cachedTypes: Record<string, string> | null = null;
 
 	private pendingKey(path: string, property: string): string { return `${path}\0${property}`; }
+
+	private loadVaultTypes(): void {
+		try {
+			const basePath = (this.app.vault.adapter as unknown as { getBasePath?: () => string }).getBasePath?.();
+			if (basePath) {
+				const fs = (window as unknown as { require?: (id: string) => unknown }).require?.("fs") as unknown as { existsSync: (p: string) => boolean; readFileSync: (p: string, e: string) => string } | undefined;
+				const path = (window as unknown as { require?: (id: string) => unknown }).require?.("path") as unknown as { join: (...p: string[]) => string } | undefined;
+				if (fs && path) {
+					const typesPath = path.join(basePath, ".obsidian", "types.json");
+					if (fs.existsSync(typesPath)) {
+						const content = fs.readFileSync(typesPath, "utf8");
+						const json = JSON.parse(content);
+						if (json?.types && typeof json.types === "object") this.cachedTypes = json.types as Record<string, string>;
+					}
+				}
+			}
+		} catch {}
+		// Fallback: try to populate from already-known types via layout samples if still null
+		if (!this.cachedTypes) this.cachedTypes = {};
+	}
+
+	private vaultTypeToKind(vaultType: string): PropertyKind | null {
+		switch (vaultType) {
+			case "checkbox": return "boolean";
+			case "number": return "number";
+			case "date": return "date";
+			case "datetime": return "datetime";
+			case "text": return "text";
+			case "multitext":
+			case "aliases":
+			case "tags": return "list";
+			default: return null;
+		}
+	}
 
 	constructor(controller: QueryController, parentEl: HTMLElement, getPluginSettings: () => MediaCompanionSettings) {
 		super(controller);
 		this.getPluginSettings = getPluginSettings;
+		this.loadVaultTypes();
 
 		// Batch bar sits above scroll, stays visible (not virtual-scrolled away)
 		this.batchBarEl = parentEl.createDiv({ cls: "mc-waterfall-batch-bar" });
@@ -107,12 +146,15 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		this.batchPropertyDropBtn.addEventListener("click", (e) => { e.stopPropagation(); this.batchPropertyInput.focus(); this.batchPropertyInput.showPicker?.(); });
 		this.batchOperationSelect = this.batchBarEl.createEl("select", { cls: "mc-batch-operation", attr: { "aria-label": "Batch operation" } }) as HTMLSelectElement;
 		this.batchValueInput = this.batchBarEl.createEl("input", { cls: "mc-batch-value", attr: { placeholder: "Value", type: "text", "aria-label": "Property value" } }) as HTMLInputElement;
+		this.batchBooleanSelect = this.batchBarEl.createEl("select", { cls: "mc-batch-value", attr: { "aria-label": "Boolean value" } }) as HTMLSelectElement;
+		this.batchBooleanSelect.createEl("option", { attr: { value: "true" }, text: "true" });
+		this.batchBooleanSelect.createEl("option", { attr: { value: "false" }, text: "false" });
+		this.batchBooleanSelect.style.display = "none";
 		this.batchClearLabel = this.batchBarEl.createDiv({ cls: "mc-batch-clear-label", text: "the property will be cleared" });
 		this.batchClearLabel.style.display = "none";
-		for (const inp of [this.batchPropertyInput, this.batchValueInput]) {
+		for (const inp of [this.batchPropertyInput, this.batchValueInput, this.batchBooleanSelect]) {
 			inp.addEventListener("mousedown", (e) => e.stopPropagation());
 			inp.addEventListener("click", (e) => e.stopPropagation());
-			inp.addEventListener("keydown", (e) => e.stopPropagation());
 			inp.addEventListener("focus", (e) => e.stopPropagation());
 		}
 		this.batchOperationSelect.addEventListener("mousedown", (e) => e.stopPropagation());
@@ -120,9 +162,36 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		this.batchOperationSelect.addEventListener("change", () => this.updateBatchBar());
 		this.batchPropertyInput.addEventListener("input", () => this.updateBatchBar());
 		this.batchPropertyInput.addEventListener("change", () => this.updateBatchBar());
-		const replaceBtn = this.batchBarEl.createEl("button", { cls: "mc-batch-replace", text: "Apply" });
+		this.batchPropertyInput.addEventListener("keydown", (e) => {
+			e.stopPropagation();
+			if (e.key === "Enter") {
+				e.preventDefault();
+				// If valid, move focus to value input; otherwise keep focus
+				if (this.batchPropertyInput.value.trim()) this.batchValueInput.focus();
+			}
+		});
+		this.batchValueInput.addEventListener("input", () => this.updateBatchBar());
+		this.batchValueInput.addEventListener("keydown", (e) => {
+			e.stopPropagation();
+			if (e.key === "Enter") {
+				e.preventDefault();
+				if (!this.batchApplyBtn.disabled) void this.executeBatch();
+			}
+		});
+		this.batchBooleanSelect.addEventListener("change", () => this.updateBatchBar());
+		this.batchBooleanSelect.addEventListener("keydown", (e) => {
+			e.stopPropagation();
+			if (e.key === "Enter") {
+				e.preventDefault();
+				if (!this.batchApplyBtn.disabled) void this.executeBatch();
+			}
+		});
+		this.batchApplyBtn = this.batchBarEl.createEl("button", { cls: "mc-batch-replace", text: "Apply" }) as HTMLButtonElement;
 		const clearBtn = this.batchBarEl.createEl("button", { cls: "mc-batch-clear", text: "Clear" });
-		replaceBtn.addEventListener("click", () => void this.executeBatch());
+		this.batchApplyBtn.addEventListener("click", () => {
+			if (this.batchApplyBtn.disabled) return;
+			void this.executeBatch();
+		});
 		clearBtn.addEventListener("click", () => this.clearSelection());
 		// Allow free-text property; datalist from visible order when available
 		this.batchPropertyInput.setAttribute("list", "mc-batch-props");
@@ -164,6 +233,8 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		});
 		const newPropsFingerprint = newVisibleProperties.join(",");
 		this.visibleProperties = newVisibleProperties;
+		// Refresh vault property types (types.json may have changed via Obsidian property type picker)
+		this.loadVaultTypes();
 
 		const filterColor = String(this.config.get("filterColor") || "").trim();
 		const colorThreshold = Number(this.config.get("colorThreshold")) || 50;
@@ -1178,6 +1249,46 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		return (item.entry as unknown as { getValue: (pid: BasesPropertyId) => unknown })?.getValue?.(pid) ?? null;
 	}
 
+	private collectPropertySamples(property: string): unknown[] {
+		const samples: unknown[] = [];
+		const pid = resolvePropertyId(property, this.visibleProperties);
+		// Prefer Bases values when property is in the view; fallback to raw frontmatter.
+		if (pid) {
+			for (const it of this.layoutItems) {
+				if (samples.length >= 10) break;
+				try {
+					const v = this.getBasesValue(it, pid);
+					if (v != null && String(v) !== "" && String(v) !== "null") samples.push(v);
+				} catch {}
+			}
+		}
+		if (samples.length === 0) {
+			// Raw frontmatter sampling from sidecar (or media file parent)
+			for (const it of this.layoutItems) {
+				if (samples.length >= 10) break;
+				const sf = it.sidecarFile;
+				if (!sf) continue;
+				const cache = this.app.metadataCache.getFileCache(sf);
+				const fm = cache?.frontmatter;
+				if (fm && property in fm) {
+					const v = (fm as Record<string, unknown>)[property];
+					if (v != null && String(v) !== "") samples.push(v);
+				}
+			}
+		}
+		return samples;
+	}
+
+	private getPropertyKind(property: string): PropertyKind {
+		// 1) Vault-declared type (types.json) is authoritative — handles empty props
+		if (this.cachedTypes && property in this.cachedTypes) {
+			const k = this.vaultTypeToKind(this.cachedTypes[property]);
+			if (k) return k;
+		}
+		const samples = this.collectPropertySamples(property);
+		return detectPropertyKind(property, this.visibleProperties, samples);
+	}
+
 	private updateBatchBar(): void {
 		const n = this.selected.size;
 		this.batchCountEl.textContent = `${n} selected`;
@@ -1185,34 +1296,85 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		this.batchBarEl.style.pointerEvents = n > 0 ? "auto" : "none";
 		this.batchPropertyInput.disabled = false;
 		this.batchValueInput.disabled = false;
+		this.batchBooleanSelect.disabled = false;
 		this.batchPropertyInput.readOnly = false;
 		this.batchValueInput.readOnly = false;
 		this.batchPropertyInput.style.pointerEvents = "auto";
 		this.batchValueInput.style.pointerEvents = "auto";
+		this.batchBooleanSelect.style.pointerEvents = "auto";
 		const property = this.batchPropertyInput.value.trim();
 		const hasText = property.length > 0;
 		this.batchPropertyClearBtn.style.display = hasText ? "flex" : "none";
 		this.batchPropertyDropBtn.style.display = hasText ? "none" : "flex";
-		const isArray = property ? this.isArrayProperty(property) : false;
+		this.currentKind = property ? this.getPropertyKind(property) : "text";
+		const kind = this.currentKind;
+		const isArray = kind === "list";
 		{
 			const currentOp = this.batchOperationSelect.value;
 			this.batchOperationSelect.empty();
-			if (!property || isArray) {
-				for (const [v, t] of [["replace","Replace"],["append","Append"],["remove","Remove"],["fill","Fill empty"],["clear","Clear"]] as const) {
-					this.batchOperationSelect.createEl("option", { attr: { value: v }, text: t });
-				}
-			} else {
-				for (const [v, t] of [["replace","Replace"],["fill","Fill empty"],["clear","Clear"]] as const) {
-					this.batchOperationSelect.createEl("option", { attr: { value: v }, text: t });
-				}
+			const ops = !property ? (["replace","append","remove","fill","clear"] as const) : allowedOperations(kind) as unknown as readonly (string)[];
+			const labels: Record<string,string> = { replace:"Replace", append:"Append", remove:"Remove", fill:"Fill empty", clear:"Clear" };
+			for (const v of ops) {
+				this.batchOperationSelect.createEl("option", { attr: { value: v }, text: labels[v] ?? v });
 			}
 			if (Array.from(this.batchOperationSelect.options).some(o => o.value === currentOp)) this.batchOperationSelect.value = currentOp;
+			if (!this.batchOperationSelect.value) this.batchOperationSelect.value = "replace";
 		}
 		const op = this.batchOperationSelect.value;
 		const isClear = op === "clear";
-		this.batchValueInput.style.display = isClear ? "none" : "";
+		const cfg = inputConfigForKind(kind);
+		// Toggle boolean select vs text/number/date input
+		if (isClear) {
+			this.batchValueInput.style.display = "none";
+			this.batchBooleanSelect.style.display = "none";
+		} else if (kind === "boolean") {
+			this.batchValueInput.style.display = "none";
+			this.batchBooleanSelect.style.display = "";
+		} else {
+			this.batchBooleanSelect.style.display = "none";
+			this.batchValueInput.style.display = "";
+			// Switch input type safely (avoid invalid type switch throwing)
+			try { (this.batchValueInput as HTMLInputElement).type = cfg.type === "select" ? "text" : cfg.type; } catch {}
+			this.batchValueInput.placeholder = cfg.placeholder;
+			if (kind === "number") this.batchValueInput.step = "any";
+			else this.batchValueInput.removeAttribute("step");
+		}
 		this.batchClearLabel.style.display = isClear ? "" : "none";
-		this.batchValueInput.placeholder = isArray ? "enter a value, or multiple separated by ," : "Enter a value";
+		// Validation: disable Apply when current raw is invalid (except fill/clear which allow empty)
+		if (!isClear) {
+			const raw = kind === "boolean" ? this.batchBooleanSelect.value : this.batchValueInput.value.trim();
+			const needsValue = op !== "fill";
+			let invalid = false;
+			let reason = "";
+			if (needsValue && !raw) {
+				// Empty not allowed for replace/append/remove on non-text? Text replace allows empty to clear? But we require value for boolean/number/date/list.
+				if (kind !== "text") { invalid = true; reason = "Enter a value"; }
+				// For text replace, empty is allowed (user may want to set empty string) — keep valid
+			} else if (raw) {
+				const check = isValidRawForKind(kind, raw);
+				if (!check.valid) { invalid = true; reason = check.reason ?? "Invalid value"; }
+			}
+			this.batchValueInput.classList.toggle("mc-batch-value-invalid", invalid && kind !== "boolean");
+			this.batchBooleanSelect.classList.toggle("mc-batch-value-invalid", invalid && kind === "boolean");
+			if (reason) {
+				this.batchValueInput.title = reason;
+				this.batchBooleanSelect.title = reason;
+			} else {
+				this.batchValueInput.removeAttribute("title");
+				this.batchBooleanSelect.removeAttribute("title");
+			}
+			this.batchApplyBtn.disabled = invalid;
+			this.batchApplyBtn.style.opacity = invalid ? "0.5" : "";
+			this.batchApplyBtn.style.pointerEvents = invalid ? "none" : "auto";
+		} else {
+			this.batchValueInput.classList.remove("mc-batch-value-invalid");
+			this.batchBooleanSelect.classList.remove("mc-batch-value-invalid");
+			this.batchValueInput.removeAttribute("title");
+			this.batchBooleanSelect.removeAttribute("title");
+			this.batchApplyBtn.disabled = false;
+			this.batchApplyBtn.style.opacity = "";
+			this.batchApplyBtn.style.pointerEvents = "auto";
+		}
 		const dl = this.batchBarEl.querySelector("datalist#mc-batch-props") as HTMLDataListElement | null;
 		if (dl) {
 			dl.empty();
@@ -1245,43 +1407,65 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 	private async confirmBatch(count: number, property: string, value: unknown, operation: string): Promise<boolean> {
 		const paths = Array.from(this.selected);
 		return confirmBatchModal(this.app, count, property, value, operation, paths, (p) => this.layoutItems.find((x) => x.mediaFile.path === p)?.mediaFile.basename ?? p.split("/").pop() ?? p, () => {
-			if (this.selected.size > 0 && this.batchBarEl.style.display !== "none") this.batchValueInput.focus();
+			if (this.selected.size > 0 && this.batchBarEl.style.display !== "none") {
+				if (this.currentKind === "boolean") this.batchBooleanSelect.focus();
+				else this.batchValueInput.focus();
+			}
 		});
 	}
 
 	private async executeBatch(): Promise<void> {
 		const property = this.batchPropertyInput.value.trim();
-		const rawValue = this.batchValueInput.value.trim();
+		const kind = this.currentKind ?? this.getPropertyKind(property);
+		const rawValue = kind === "boolean" ? this.batchBooleanSelect.value.trim() : this.batchValueInput.value.trim();
 		const operation = this.batchOperationSelect.value || "replace";
 		if (!property) { new Notice("Enter a property name"); return; }
 		if (this.selected.size === 0) { new Notice("No files selected"); return; }
 		const reserved = ["MC-size", "MC-colors", "MC-last-updated"];
 		if (reserved.includes(property)) { new Notice(`Cannot batch-edit reserved property ${property}`); return; }
-		const isArray = this.isArrayProperty(property);
+		// Disallow editing of read-only Bases types (file.* and formula.*) — only note.* (frontmatter) is editable
+		const pidCheck = resolvePropertyId(property, this.visibleProperties);
+		if (pidCheck) {
+			try {
+				const parsed = parsePropertyId(pidCheck);
+				if (parsed.type !== "note") { new Notice(`Property '${property}' is ${parsed.type} (read-only) and cannot be batch-edited`); return; }
+			} catch {}
+		}
+		const isArray = kind === "list";
 		const isClear = operation === "clear";
+		// Enforce allowed operations for the detected kind
+		const allowed = allowedOperations(kind);
+		if (!allowed.includes(operation as typeof allowed[number])) {
+			new Notice(`Operation '${operation}' not allowed for ${kind} property`);
+			return;
+		}
 		if (!isClear && !rawValue && operation !== "fill") {
-			// Allow empty string for Replace on string props (creates empty property), but not for array ops without value
-			if (isArray && operation !== "clear") { new Notice("Enter a value"); return; }
+			if (kind !== "text") { new Notice("Enter a value"); return; }
+			// Text replace may allow empty string — fall through
+		}
+		if (!isClear && rawValue) {
+			const check = isValidRawForKind(kind, rawValue);
+			if (!check.valid) { new Notice(check.reason ?? "Invalid value"); return; }
 		}
 		let value: unknown;
 		let parsedValues: string[] = [];
 		if (isClear) {
 			value = undefined;
 		} else if (isArray) {
-			parsedValues = rawValue.split(",").map((s) => s.trim()).filter(Boolean);
-			if (property === "tags") parsedValues = [...new Set(parsedValues.map((s) => s.toLowerCase()))];
-			else parsedValues = [...new Set(parsedValues)];
+			const parsed = parseRawForKind("list", rawValue, property);
+			parsedValues = parsed as string[];
 			if (parsedValues.length === 0 && operation !== "clear") { new Notice("Enter a value"); return; }
-			// For Replace we set array, for Append/Remove etc we need the list
 			if (operation === "replace") value = parsedValues;
 			else value = parsedValues;
 		} else {
-			// String property: rawValue as-is (empty string allowed for Replace)
-			try {
-				const parsed = JSON.parse(rawValue);
-				if (typeof parsed === "number" || typeof parsed === "boolean") value = parsed;
-				else value = rawValue;
-			} catch { value = rawValue; }
+			// Use kind-aware parser: boolean -> true/false, number -> Number, date/datetime -> string, text -> raw
+			if (!rawValue && operation === "fill") {
+				// Fill with empty is handled later (no-op); but we need a placeholder value for validation
+				// For boolean/number/date, fill with empty is invalid already returned above
+				value = kind === "number" ? 0 : kind === "boolean" ? false : rawValue;
+			} else {
+				value = parseRawForKind(kind, rawValue, property);
+			}
 		}
 		const displayValue = isClear ? undefined : isArray && operation !== "replace" ? parsedValues : value;
 		if (!await this.confirmBatch(this.selected.size, property, displayValue, operation)) return;
