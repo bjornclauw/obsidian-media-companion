@@ -2,6 +2,7 @@ import { Notice, Platform, type App, type TFolder } from "obsidian";
 import type MediaCompanion from "main";
 import type Cache from "../cache";
 import Sidecar from "../model/sidecar";
+import { isPathExcluded } from "../settings";
 
 interface UploadRequest {
 	imageBase64: string;
@@ -144,9 +145,10 @@ export default class ApiServer {
 
 	private handleFolders(res: import("http").ServerResponse): void {
 		const folders: string[] = [];
+		const excluded = this.plugin.settings.excludedFolders;
 
 		const collect = (folder: TFolder) => {
-			if (folder.path) {
+			if (folder.path && !isPathExcluded(folder.path, excluded)) {
 				folders.push(folder.path);
 			}
 			for (const child of folder.children) {
@@ -190,6 +192,14 @@ export default class ApiServer {
 		const folder = (body.folder ?? "").replace(/^\/+|\/+$/g, "");
 		const filePath = folder ? `${folder}/${sanitizedName}` : sanitizedName;
 		const sidecarPath = `${filePath}${Sidecar.EXTENSION}`;
+
+		if (isPathExcluded(filePath, this.plugin.settings.excludedFolders)) {
+			this.sendJson(res, 403, {
+				error: "Destination folder is excluded",
+				path: filePath,
+			});
+			return;
+		}
 
 		if (this.app.vault.getFileByPath(filePath)) {
 			this.sendJson(res, 409, {

@@ -1,5 +1,5 @@
-import { App, debounce, Platform, Plugin, PluginSettingTab, Setting, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
-import { DEFAULT_SETTINGS } from 'src/settings'
+import { App, AbstractInputSuggest, debounce, Platform, Plugin, PluginSettingTab, Setting, setIcon, TFile, TFolder, WorkspaceLeaf } from 'obsidian';
+import { DEFAULT_SETTINGS, normalizeVaultPath } from 'src/settings'
 import type { MediaCompanionSettings } from 'src/settings';
 import Cache from 'src/cache';
 import MutationHandler from 'src/mutationHandler';
@@ -226,8 +226,40 @@ export default class MediaCompanion extends Plugin {
 	}
 }
 
+class FolderSuggest extends AbstractInputSuggest<TFolder> {
+	private readonly onPick: (folder: TFolder) => void;
+
+	constructor(app: App, inputEl: HTMLInputElement, onPick: (folder: TFolder) => void) {
+		super(app, inputEl);
+		this.onPick = onPick;
+		this.limit = 50;
+	}
+
+	protected getSuggestions(query: string): TFolder[] {
+		const q = query.toLowerCase().trim();
+		const folders = this.app.vault.getAllLoadedFiles().filter((f): f is TFolder => f instanceof TFolder);
+
+		if (!q) return folders.slice(0, this.limit);
+
+		return folders
+			.filter((f) => f.path.toLowerCase().includes(q))
+			.sort((a, b) => a.path.length - b.path.length)
+			.slice(0, this.limit);
+	}
+
+	renderSuggestion(folder: TFolder, el: HTMLElement): void {
+		el.setText(folder.path);
+	}
+
+	selectSuggestion(folder: TFolder): void {
+		this.onPick(folder);
+		this.close();
+	}
+}
+
 class MediaCompanionSettingTab extends PluginSettingTab {
 	plugin: MediaCompanion;
+	private folderSuggest: FolderSuggest | null = null;
 
 	constructor(app: App, plugin: MediaCompanion) {
 		super(app, plugin);
@@ -236,6 +268,9 @@ class MediaCompanionSettingTab extends PluginSettingTab {
 
 	display(): void {
 		const { containerEl } = this;
+
+		this.folderSuggest?.close();
+		this.folderSuggest = null;
 
 		const extensionDebounce = debounce(async (value: string) => {
 			this.plugin.settings.extensions = value.split(',')
@@ -269,6 +304,59 @@ class MediaCompanionSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					extensionDebounce(value);
 				}));
+
+		const excludedListEl = containerEl.createDiv({ cls: 'mc-excluded-folders-list' });
+
+		const renderExcludedFolders = () => {
+			excludedListEl.empty();
+			const folders = this.plugin.settings.excludedFolders;
+
+			if (folders.length === 0) {
+				excludedListEl.createDiv({ cls: 'mc-excluded-empty', text: 'No folders excluded.' });
+				return;
+			}
+
+			for (const folder of folders) {
+				const row = excludedListEl.createDiv({ cls: 'mc-excluded-folder' });
+				row.createSpan({ cls: 'mc-excluded-folder-path', text: folder });
+				const removeBtn = row.createEl('button', {
+					cls: 'mc-excluded-folder-remove',
+					attr: { 'aria-label': `Remove ${folder}` },
+				});
+				setIcon(removeBtn, 'x');
+				removeBtn.addEventListener('click', () => {
+					void (async () => {
+						this.plugin.settings.excludedFolders = this.plugin.settings.excludedFolders.filter((f) => f !== folder);
+						await this.plugin.saveSettings();
+						renderExcludedFolders();
+						await this.plugin.cache.updateExcludedFolders();
+					})();
+				});
+			}
+		};
+
+		new Setting(containerEl)
+			.setName('Excluded folders')
+			.setDesc('Media files in these folders and their subfolders are ignored: no sidecar files are created and they are omitted from the gallery.')
+			.addText(text => {
+				text.setPlaceholder('Type to search folders...');
+				this.folderSuggest = new FolderSuggest(this.app, text.inputEl, (folder) => {
+					void (async () => {
+						const normalized = normalizeVaultPath(folder.path);
+						if (!normalized) return;
+						if (!this.plugin.settings.excludedFolders.includes(normalized)) {
+							this.plugin.settings.excludedFolders.push(normalized);
+							this.plugin.settings.excludedFolders.sort((a, b) => a.localeCompare(b));
+							await this.plugin.saveSettings();
+							renderExcludedFolders();
+							await this.plugin.cache.updateExcludedFolders();
+						}
+						text.setValue('');
+					})();
+				});
+			});
+
+		renderExcludedFolders();
 
 		new Setting(containerEl)
 			.setName('Sidecar template')
@@ -353,5 +441,11 @@ class MediaCompanionSettingTab extends PluginSettingTab {
 					this.plugin.settings.fullscreenHoverDelay = value;
 					await this.plugin.saveSettings();
 				}));
+	}
+
+	hide(): void {
+		this.folderSuggest?.close();
+		this.folderSuggest = null;
+		super.hide();
 	}
 }

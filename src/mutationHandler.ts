@@ -5,6 +5,7 @@ import type Cache from "./cache";
 import { getMediaType, MediaTypes } from "./model/types/mediaTypes";
 import MCImage from "./model/types/image/image";
 import Sidecar from "./model/sidecar";
+import { isPathExcluded } from "./settings";
 
 /**
  * Handles mutations in the vault
@@ -155,6 +156,9 @@ export default class MutationHandler extends EventTarget {
 	 */
 	private async createMediaFile(file: TAbstractFile, sidecar: TFile | null = null): Promise<MediaFile | null> {
 		if (!(file instanceof TFile) || !this.plugin.settings.extensions.contains(file.extension.toLowerCase())) return null;
+
+		// Ignore media files that live in an excluded folder
+		if (isPathExcluded(file.path, this.plugin.settings.excludedFolders)) return null;
 
 		// Make sure it is not already in the cache
 		if (this.cache.getFile(file.path)) return null;

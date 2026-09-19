@@ -4,6 +4,7 @@ import type MediaCompanion from "main";
 import { getMediaType, MediaTypes } from "./model/types/mediaTypes";
 import MCImage from "./model/types/image/image";
 import Sidecar from "./model/sidecar";
+import { isPathExcluded } from "./settings";
 
 /**
  * Represents a cache for media files
@@ -69,6 +70,7 @@ export default class Cache {
 		const total_files = files.length;
 
 		files = files.filter(f => this.plugin.settings.extensions.contains(f.extension.toLowerCase()));
+		files = files.filter(f => !isPathExcluded(f.path, this.plugin.settings.excludedFolders));
 
 		console.debug(
 			`%c[Media Companion]: %cBuilding cache with ${files.length} media files found of ${total_files} files total \n                   If this is the first time, this may take a while`, 
@@ -129,10 +131,12 @@ export default class Cache {
 		this.building = true;
 
 		this.files = this.files.filter(f => this.plugin.settings.extensions.contains(f.file.extension.toLowerCase()));
+		this.files = this.files.filter(f => !isPathExcluded(f.file.path, this.plugin.settings.excludedFolders));
 
 		let files = this.app.vault.getFiles();
 
 		files = files.filter(f => this.plugin.settings.extensions.contains(f.extension.toLowerCase()));
+		files = files.filter(f => !isPathExcluded(f.path, this.plugin.settings.excludedFolders));
 		// This is an awful way to do this; It's O(N^2) - Should improve at some point
 		files = files.filter(f => !this.files.some(mf => mf.file.path === f.path));
 
@@ -162,6 +166,15 @@ export default class Cache {
 
 		notice.hide();
 		this.building = false;
+	}
+
+	/**
+	 * Rebuilds the cache after the excluded folders setting is changed,
+	 * removing files that are now excluded and adding files that are no
+	 * longer excluded.
+	 */
+	public async updateExcludedFolders(): Promise<void> {
+		await this.updateExtensions();
 	}
 
 	/**

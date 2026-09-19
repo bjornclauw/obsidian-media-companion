@@ -8,6 +8,7 @@ import { getShape } from "../model/types/shape";
 import { hexToRgb, rgbToHsl, isColorWithinThreshold } from "../util/color";
 import { VIEW_TYPE_SIDECAR } from "./sidecar-view";
 import type { MediaCompanionSettings } from "../settings";
+import { isPathExcluded } from "../settings";
 
 export const BASES_VIEW_TYPE_WATERFALL = "mc-waterfall";
 
@@ -403,6 +404,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 		// additional sidecar-backed media files in the same folders.
 		if (deduplicatedCount > 0) {
 			let remaining = deduplicatedCount;
+			const excludedFolders = this.getPluginSettings().excludedFolders;
 			
 			for (const folderPath of foldersInResult) {
 				if (remaining <= 0) break;
@@ -427,6 +429,7 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 					const mediaFile = this.app.vault.getFileByPath(mediaPath);
 					
 					if (!mediaFile) continue;
+					if (isPathExcluded(mediaFile.path, excludedFolders)) continue;
 
 					seenMediaPaths.add(mediaPath);
 					const meta = this.readSidecarMeta(sidecarFile);
@@ -903,16 +906,22 @@ export class WaterfallBasesView extends BasesView implements HoverParent {
 	}
 
 	private resolveMediaFile(file: TFile): { mediaFile: TFile; sidecarFile: TFile | null } | null {
+		const excluded = this.getPluginSettings().excludedFolders;
+
 		if (file.path.endsWith(Sidecar.EXTENSION)) {
 			const mediaPath = file.path.slice(0, -Sidecar.EXTENSION.length);
 			const mediaFile = this.app.vault.getFileByPath(mediaPath);
-			
-			return mediaFile ? { mediaFile, sidecarFile: file } : null;
+
+			if (!mediaFile || isPathExcluded(mediaFile.path, excluded)) return null;
+
+			return { mediaFile, sidecarFile: file };
 		}
 
 		const mediaType = getMediaType(file.extension);
-		
+
 		if (mediaType !== MediaTypes.Unknown) {
+			if (isPathExcluded(file.path, excluded)) return null;
+
 			const sidecarFile = this.app.vault.getFileByPath(`${file.path}${Sidecar.EXTENSION}`);
 			
 			return { mediaFile: file, sidecarFile };
